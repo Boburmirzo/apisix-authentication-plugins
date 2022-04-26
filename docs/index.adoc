@@ -1,0 +1,550 @@
+= Centralized Authentication with Apache APISIX Plugins example
+Bobur Umurzokov <bumurzaqov2@gmail.com>
+:toc:
+:icons: font
+:experimental: true
+
+== Concepts
+
+We should learn a couple of core concepts before Apache APISIX work as per our needs.
+
+. https://apisix.apache.org/docs/apisix/architecture-design/route/[Route^] is the most critical concept in Apache APISIX; it instructs APISIX how to forward traffic to the correct upstream.
+. https://apisix.apache.org/docs/apisix/architecture-design/upstream/[Upstream^] is the view of backend microservices from Apache APISIX point of view.
+. https://apisix.apache.org/docs/apisix/architecture-design/plugin/[Plugin^] is a mechanism to manage traffic (authentication, authorization, and so on) on the APISIX side.
+
+== Pre-requisites
+
+* Installed https://www.docker.com/[Docker^] and https://docs.docker.com/compose/[Docker Compose^] component.
+* We use the https://curl.se/docs/manpage.html[curl^] command for API testing.
+You can also use other tools such as Postman for testing.
+
+== Install Apache APISIX
+
+Download the Docker image of Apache APISIX.
+
+[source,bash^]
+----
+git clone https://github.com/apache/apisix-docker.git
+----
+
+Switch the current directory to the apisix-docker/example path.
+
+[source,bash^]
+----
+cd apisix-docker/example
+----
+
+Run the docker-compose command to install Apache APISIX.
+
+[source,bash]
+----
+docker-compose -p docker-apisix up -d
+----
+
+== HTTP Basic Authentication
+
+The simplest way to handle authentication is through the use of HTTP, where the username and password are sent alongside every API call. You can use an HTTP header and encode the username and password.
+
+[INFO]
+====
+The https://apisix.apache.org/docs/apisix/plugins/basic-auth[Apache APISIX basic-auth plugin] is an authentication plugin that works with the consumer object. In the context of an HTTP transaction, basic access authentication is a method to provide a user name and password when making a request.
+====
+
+Let's enable basic-auth plugin for a consumer and configure the value of username and password.
+
+[source,bash]
+----
+curl http://127.0.0.1:9080/apisix/admin/consumers -H 'X-API-KEY: edd1c9f034335f136f87ad84b625c8f1' -X PUT -d '
+{
+    "username": "foo",
+    "plugins": {
+        "basic-auth": {
+            "username": "example_username",
+            "password": "your_strong_password"
+        }
+    }
+}'
+----
+
+When the consumer is created successfully, you will get the following JSON object in the response:
+
+[source,json5]
+----
+{
+  "node": {
+    "value": {
+      "create_time": 1650866058,
+      "username": "foo",
+      "update_time": 1650866058,
+      "plugins": {
+        "basic-auth": {
+          "password": "your_strong_password",
+          "username": "example_username"
+        }
+      }
+    },
+    "key": "/apisix/consumers/foo"
+  },
+  "action": "set"
+}
+
+----
+
+Afterwards, we need to add a Route and allow `basi-auth` to control the requests by specifying it in plugins settings:
+
+[source,bash]
+----
+curl http://127.0.0.1:9080/apisix/admin/routes/1 -H 'X-API-KEY: edd1c9f034335f136f87ad84b625c8f1' -X PUT -d '
+{
+    "methods": ["GET"],
+    "uri": "/get",
+    "plugins": {
+        "basic-auth": {}
+    },
+    "upstream_id": "1"
+}'
+----
+
+Apache APISIX servers responds with the success:
+
+[source,json5]
+----
+{
+  "node": {
+    "value": {
+      "methods": [
+        "GET"
+      ],
+      "upstream_id": "1",
+      "uri": "/get",
+      "update_time": 1650866398,
+      "plugins": {
+        "basic-auth": {
+          "hide_credentials": false
+        }
+      },
+      "status": 1,
+      "create_time": 1648567195,
+      "id": "1",
+      "priority": 0
+    },
+    "key": "/apisix/routes/1"
+  },
+  "action": "set"
+}
+----
+
+Up to now, we have all set, and we can test different cases below:
+
+- Case 1: Requesting `/get` endpoint without authorization details.
+
+[source,bash]
+----
+curl -i http://127.0.0.1:9080/get
+----
+
+You will receive the HTTP 401 error in the response, as we expected:
+
+[source,json]
+----
+{"message":"Missing authorization in request"}
+----
+
+- Case 2: When the user provides valid username and password.
+
+[source,bash]
+----
+curl -i -uexample_username:your_strong_password http://127.0.0.1:9080/get
+----
+
+Urraa! Now we got 200 OK response from the upstream indicating that authentication plugin is working well.
+
+[source,text]
+----
+HTTP/1.1 200 OK
+...
+----
+
+- Case 3: When we access the upstream with wrong user credentials.
+
+[source,bash]
+----
+curl -i -uexample_username:wrong_password http://127.0.0.1:9080/get
+----
+
+Correct, we got an error saying that "Password is incorrect"
+
+[source,json]
+----
+{"message":"Password is error"}
+----
+
+That's all about basic-auth plugin setup.
+
+== API Key Authentication
+
+In the previous section, we demonstrated the usability of one type of authentication methods with the help of APISIX `basic-auth` plugin. Now let's have a look another plugin `key-auth`
+
+This technique creates unique keys for users and passes them with every request. The API generates a secret key that is a long, difficult-to-guess string of numbers and letters—at least 30 characters long, although there’s no set standard length. It is typically passed alongside the API authorization header.
+
+[INFO]
+====
+The https://apisix.apache.org/docs/apisix/plugins/key-auth[Apache APISIX key-auth Plugin] is an authentication plugin, it should work with consumer together.
+
+Add Key Authentication (also sometimes referred to as an API key) to a Service or a Route. Consumers then add their key either in a query string parameter or a header to authenticate their requests.
+====
+
+To enable `key-auth` plugin, two steps needs to be done:
+
+- Step 1: Create a consumer object, and set the attributes of plugin key-auth.
+
+.See the command
+[%collapsible]
+====
+[source,bash]
+----
+include::../cmds/key-auth-plugin-enable.sh[]
+----
+====
+
+The response from APISIX, you can expect like below:
+
+[source,json5]
+----
+{
+  "node": {
+    "value": {
+      "username": "example_username",
+      "update_time": 1650822986,
+      "plugins": {
+        "key-auth": {
+          "key": "auth-one"
+        }
+      },
+      "create_time": 1650822986
+    },
+    "key": "/apisix/consumers/example_username"
+  },
+  "action": "set"
+}
+----
+
+- Step 2: After we enabled `key-auth` plugin, we can create a new route and apply key-auth plugin configuration. For the simplicity, we can keep JSON Object for key-auth plugin as an empty.
+
+.See the command
+[%collapsible]
+====
+[source,bash]
+----
+include::../cmds/key-auth-plugin-map-to-the-route.sh[]
+----
+====
+
+[NOTE]
+====
+By default, APISIX sets key name as _apiKey_ in the header, you can also customize default header by adding configuration for the `key-auth` plugin
+====
+
+[source,bash]
+----
+{
+    "key-auth": {
+        "header": "Authorization"
+    }
+}
+----
+
+You wil get the following reponse from Admin API endpoint:
+
+[source,json5]
+----
+{
+  "node": {
+    "value": {
+      "uri": "/get",
+      "priority": 0,
+      "status": 1,
+      "plugins": {
+        "key-auth": {
+          "header": "apikey",
+          "query": "apikey"
+        }
+      },
+      "create_time": 1648567195,
+      "update_time": 1650823379,
+      "methods": [
+        "GET"
+      ],
+      "upstream_id": "1",
+      "id": "1"
+    },
+    "key": "/apisix/routes/1"
+  },
+  "action": "set"
+}
+----
+
+Now we can test our `key-auth` plugin by accessing our GET endpoint without _apiKey_ header.
+
+[source,bash]
+----
+curl http://127.0.0.2:9080/get
+----
+
+As we expected, it returns an error with 401 HTTP Status code:
+
+[source,json]
+----
+{"message":"Missing API key found in request"}
+----
+
+However, if we specify the _apiKey_ in the header, it should respond with the success:
+
+[source,bash]
+----
+curl http://127.0.0.2:9080/get -H 'apikey: auth-one' -i
+----
+
+Great, now the API Key authentication is enabled for the endpoint.
+
+[source,text]
+----
+HTTP/1.1 200 OK
+Content-Type: application/json
+Content-Length: 326
+Connection: keep-alive
+...
+----
+
+Another scenario is when the user is trying to access the endpoint with wrong _apiKey_
+
+[source,bash]
+----
+curl http://127.0.0.2:9080/get -H 'apikey: wrong_api_key' -i
+----
+
+Output:
+
+[source,json]
+----
+{"message":"Invalid API key in request"}
+----
+
+== JWT Plugin
+
+Apache APISIX API Gateway acts as a single entry point and offers many authentication plugins, including:
+
+* https://apisix.apache.org/docs/apisix/plugins/basic-auth[HTTP Basic Auth^]
+* https://apisix.apache.org/docs/apisix/plugins/key-auth[API Keys based Auth^]
+* https://apisix.apache.org/docs/apisix/plugins/openid-connect[OpenID Connect^]
+* https://apisix.apache.org/docs/apisix/plugins/hmac-auth[HMAC Auth^]
+* https://apisix.apache.org/docs/apisix/plugins/ldap-auth[Ldap Authentication^]
+* etc.
+
+The https://apisix.apache.org/docs/apisix/plugins/jwt-auth[JWT (JSON Web Token) plugin^] is another solid option for API gateway authentication.
+JWT simplifies authentication setup, taking care of the nitty-gritty details.
+Please refer to https://jwt.io/[JWT^] for more information.
+
+[INFO]
+====
+The https://apisix.apache.org/docs/apisix/plugins/jwt-auth[Apache APISIX JWT Plugin] acts as an issuer and also validates the token on behalf of the API.
+It means that developers do not have to add any code to process the authentication.
+====
+
+[IMPORTANT]
+====
+We need to disable the `key-auth` plugin we previously enabled to use another authentication plugin.
+Disabling is possible via the Dashboard or the CLI.
+
+image::disable-key-auth-plugin.png[]
+====
+
+Let's apply the JWT plugin to our existing API.
+We update the existing `Consumer` plugin config with JWT-related configuration:
+
+.See the command
+[%collapsible]
+====
+[source,bash]
+----
+include::../cmds/8_update_consumer_jwt_credentials.sh[]
+----
+====
+
+The response will look something like this:
+
+[source,json5]
+----
+{
+  "node": {
+    "key": "/apisix/consumers/example_consumer",
+    "value": {
+      "create_time": 1649158467,
+      "username": "example_consumer",
+      "update_time": 1649163154,
+      "plugins": {
+        "jwt-auth": {
+          "base64_secret": false,
+          "secret": "my-secret-key",
+          "algorithm": "HS256",
+          "key": "user-key",
+          "exp": 86400
+        }
+      }
+    }
+  },
+  "action": "set"
+}
+----
+
+We can now add the `jwt-auth` plugin to the Route we have created previously:
+
+.See the command
+[%collapsible]
+====
+[source,bash]
+----
+include::../cmds/8_add_jwt_plugin_to_route.sh[]
+----
+====
+
+Response:
+
+[source,json5]
+----
+{
+  "node": {
+    "key": "/apisix/routes/1",
+    "value": {
+      "upstream_id": "1",
+      "uri": "/get",
+      "create_time": 1648567195,
+      "status": 1,
+      "id": "1",
+      "plugins": {
+        "jwt-auth": {}
+      },
+      "priority": 0,
+      "methods": [
+        "GET"
+      ],
+      "update_time": 1649163340
+    }
+  },
+  "action": "set"
+}
+
+----
+
+We want to validate that the setup is correct as we did before.
+
+[TIP]
+====
+`jwt-auth` uses the HS256 algorithm by default.
+If you use the RS256 algorithm, you must specify the algorithm and configure the public and private keys.
+Please check the https://apisix.apache.org/docs/apisix/plugins/jwt-auth#:~:text=jwt%2Dauth%20uses%20the%20HS256%20algorithm[documentation^] for more details.
+====
+
+First, you need to set up the route for the API that signs the token, which will use the https://apisix.apache.org/docs/apisix/plugins/public-api/[public-api^] plugin.
+
+.See the command
+[%collapsible]
+====
+[source,bash]
+----
+include::../cmds/8_jwt_plugin_enable_public-api-plugin.sh[]
+----
+====
+
+Response:
+
+[source,json5]
+----
+{
+  "action": "set",
+  "node": {
+    "key": "/apisix/routes/jas",
+    "value": {
+      "status": 1,
+      "priority": 0,
+      "id": "jas",
+      "update_time": 1649490287,
+      "plugins": {
+        "public-api": {}
+      },
+      "uri": "/apisix/plugin/jwt/sign",
+      "create_time": 1649490287
+    }
+  }
+}
+----
+
+Then, run the following command to generate a new JWT token:
+
+.See the command
+[%collapsible]
+====
+[source,bash]
+----
+include::../cmds/8_jwt_plugin_generate_token.sh[]
+----
+====
+
+Apache APISIX returns a token:
+
+[source,text]
+----
+HTTP/1.1 200 OK
+Date: Tue, 05 Apr 2022 12:57:34 GMT
+Content-Type: text/plain; charset=utf-8
+Transfer-Encoding: chunked
+Connection: keep-alive
+Server: APISIX/2.12.1
+
+<GENERATED_TOKEN>
+----
+
+We can use the newly-generated token to authenticate our next request:
+
+.See the command
+[%collapsible]
+====
+[source,bash]
+----
+include::../cmds/8_jwt_plugin_in_use.sh[]
+----
+====
+
+Output with token:
+
+[source,text]
+----
+HTTP/1.1 200 OK
+Content-Type: application/json
+Content-Length: 454
+Connection: keep-alive
+Date: Tue, 05 Apr 2022 13:02:30 GMT
+Access-Control-Allow-Origin: *
+Access-Control-Allow-Credentials: true
+Server: APISIX/2.12.1
+----
+
+If you try to access the same endpoint without a token in the Header request, you will get HTTP Error _401 Unauthorized:
+
+.See the command
+[%collapsible]
+====
+[source,bash]
+----
+include::../cmds/8_jwt_plugin_failure_example.sh[]
+----
+====
+
+Output without token:
+
+[source,json5]
+----
+{ "message": "Missing JWT token in request" }
+----
+
+We have validated the client's identity attempting to request by using various https://apisix.apache.org/docs/apisix/plugins/key-auth[authentication plugins] with the help of Apache APISIX.
